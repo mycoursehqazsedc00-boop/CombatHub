@@ -17,10 +17,10 @@ Shared combat event dispatcher, GUID/spell cache, and adapter coordinator for Va
 
 | Addon | Adapter File | Subscribed Events | Filter Policy | Purpose |
 |---|---|---|---|---|
-| **KLHThreatMeter** | `Code\KTM_CombatHub.lua` | `COMBAT_LOG_EVENT_UNFILTERED` or Nampower `*_SELF` + `UNIT_CASTEVENT` | `"self"` | Feeds self threat events without duplicate listeners |
-| **GreedMeter** | `Parser\Adapter_CombatHub.lua` | Nampower combat, heal, dispel, aura/CC, shield, environmental, `UNIT_DIED`, roster events | `nil` (raid-wide) | Shares single Nampower event stream across the raid |
-| **EavesDrop** | `EavesDrop_CombatHub.lua` | `COMBAT_LOG_EVENT_UNFILTERED` or Nampower `*_SELF`/`*_OTHER`, `UNIT_DIED`, pet/world events | `"self_or_pet"` for `*_OTHER`; `nil` for `*_SELF` | Drops irrelevant raid-wide `*_OTHER` traffic before addon parsing |
-| **vampify** | `capture\combathub.lua` | `SPELL_DAMAGE_EVENT_SELF`, `AUTO_ATTACK_SELF`, `SPELL_GO_SELF` + dynamic incoming events | `"self"` | Routes damage and optional incoming watch/perhit through one hub |
+| **[KLHThreatMeter](https://github.com/mycoursehqazsedc00-boop/KLHThreatMeter)** | `Code\KTM_CombatHub.lua` | `COMBAT_LOG_EVENT_UNFILTERED` or Nampower `*_SELF` + `UNIT_CASTEVENT` | `"self"` | Feeds self threat events without duplicate listeners |
+| **[GreedMeter](https://github.com/mycoursehqazsedc00-boop/GreedMeter)** | `Parser\Adapter_CombatHub.lua` | Nampower combat, heal, dispel, aura/CC, shield, environmental, `UNIT_DIED`, roster events | `nil` (raid-wide) | Shares single Nampower event stream across the raid |
+| **[EavesDrop](https://github.com/mycoursehqazsedc00-boop/EavesDrop)** | `EavesDrop_CombatHub.lua` | `COMBAT_LOG_EVENT_UNFILTERED` or Nampower `*_SELF`/`*_OTHER`, `UNIT_DIED`, pet/world events | `"self_or_pet"` for `*_OTHER`; `nil` for `*_SELF` | Drops irrelevant raid-wide `*_OTHER` traffic before addon parsing |
+| **[vampify](https://github.com/mycoursehqazsedc00-boop/vampify)** | `capture\combathub.lua` | `SPELL_DAMAGE_EVENT_SELF`, `AUTO_ATTACK_SELF`, `SPELL_GO_SELF` + dynamic incoming events | `"self"` | Routes damage and optional incoming watch/perhit through one hub |
 
 > **Note:** `BigWigs` and `ChronicleCompanion` are intentionally left untouched and run independently without interference.
 
