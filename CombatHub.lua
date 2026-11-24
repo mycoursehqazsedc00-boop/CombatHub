@@ -7,7 +7,7 @@
 CombatHub = CombatHub or {}
 local CH = CombatHub
 
-CH.VERSION = "1.0.0"
+CH.VERSION = "1.1.0"
 
 -------------------------------------------------------------------------
 -- Mod Detection (refreshed on PLAYER_LOGIN)
@@ -27,7 +27,7 @@ local function DetectMods()
 end
 
 -------------------------------------------------------------------------
--- Shared GUID & Spell Caches
+-- Shared GUID, Roster & Spell Caches
 -------------------------------------------------------------------------
 local playerGUID = nil
 local petGUID    = nil
@@ -35,6 +35,10 @@ local petGUID    = nil
 local guidNameCache = {}
 local guidNameCount = 0
 local MAX_GUID_CACHE = 800
+
+local guidUnitCache = {}
+local petOwnerCache = {}
+local rosterCacheCount = 0
 
 local spellCache = {}
 local spellCacheCount = 0
@@ -56,19 +60,75 @@ local function ReadUnitGUID(unit)
     return nil
 end
 
+local function StoreGuidName(guid, name)
+    if not guid or guid == "" or not name or name == "" or name == "Unknown" then return end
+    if not guidNameCache[guid] then
+        if guidNameCount >= MAX_GUID_CACHE then
+            guidNameCache = {}
+            guidNameCount = 0
+        end
+        guidNameCount = guidNameCount + 1
+    end
+    guidNameCache[guid] = name
+end
+
+local function CacheRosterUnit(unit, ownerGuid)
+    local g = ReadUnitGUID(unit)
+    if not g then return nil end
+    guidUnitCache[g] = unit
+    rosterCacheCount = rosterCacheCount + 1
+    if ownerGuid then
+        petOwnerCache[g] = ownerGuid
+    end
+    local name = UnitName(unit)
+    StoreGuidName(g, name)
+    return g
+end
+
 function CH:RefreshSelfGUIDs()
     playerGUID = ReadUnitGUID("player")
     petGUID    = ReadUnitGUID("pet")
     if playerGUID then
-        local pname = UnitName("player")
-        if pname and pname ~= "" then
-            guidNameCache[playerGUID] = pname
-        end
+        guidUnitCache[playerGUID] = "player"
+        StoreGuidName(playerGUID, UnitName("player"))
     end
     if petGUID then
-        local petname = UnitName("pet")
-        if petname and petname ~= "" then
-            guidNameCache[petGUID] = petname
+        guidUnitCache[petGUID] = "pet"
+        if playerGUID then
+            petOwnerCache[petGUID] = playerGUID
+        end
+        StoreGuidName(petGUID, UnitName("pet"))
+    end
+end
+
+function CH:RefreshRosterCache()
+    guidUnitCache = {}
+    petOwnerCache = {}
+    rosterCacheCount = 0
+
+    self:RefreshSelfGUIDs()
+
+    local numRaid = GetNumRaidMembers and GetNumRaidMembers() or 0
+    if numRaid > 0 then
+        local i
+        for i = 1, numRaid do
+            local unit = "raid" .. i
+            local ownerG = CacheRosterUnit(unit, nil)
+            if ownerG then
+                CacheRosterUnit("raidpet" .. i, ownerG)
+            end
+        end
+    else
+        local numParty = GetNumPartyMembers and GetNumPartyMembers() or 0
+        if numParty > 0 then
+            local i
+            for i = 1, numParty do
+                local unit = "party" .. i
+                local ownerG = CacheRosterUnit(unit, nil)
+                if ownerG then
+                    CacheRosterUnit("partypet" .. i, ownerG)
+                end
+            end
         end
     end
 end
@@ -84,13 +144,24 @@ function CH:GetPetGUID()
     return petGUID
 end
 
+function CH:GetUnitToken(guid)
+    if not guid or guid == "" then return nil end
+    return guidUnitCache[guid]
+end
+
+function CH:GetOwnerGUID(petGuid)
+    if not petGuid or petGuid == "" then return nil end
+    return petOwnerCache[petGuid]
+end
+
 function CH:ResolveUnitName(guid)
     if not guid or guid == "" then return nil end
     local cached = guidNameCache[guid]
     if cached then return cached end
+    if not CH.mods.superwow then return nil end
 
-    local name = UnitName(guid)
-    if name and name ~= "" and name ~= "Unknown" then
+    local ok, name = pcall(UnitName, guid)
+    if ok and name and name ~= "" and name ~= "Unknown" then
         if guidNameCount >= MAX_GUID_CACHE then
             guidNameCache = {}
             guidNameCount = 0
@@ -145,9 +216,12 @@ end
 function CH:ClearCaches()
     guidNameCache = {}
     guidNameCount = 0
+    guidUnitCache = {}
+    petOwnerCache = {}
+    rosterCacheCount = 0
     spellCache = {}
     spellCacheCount = 0
-    self:RefreshSelfGUIDs()
+    self:RefreshRosterCache()
 end
 
 -------------------------------------------------------------------------
@@ -166,6 +240,7 @@ CH.stats = {
     dispatched = 0,
     filteredOut = 0,
     registeredEvents = 0,
+    errors = 0,
 }
 CH.debugTrace = false
 
@@ -175,12 +250,23 @@ local function Trace(msg)
     end
 end
 
+local CORE_EVENTS = {
+    PLAYER_LOGIN          = true,
+    PLAYER_ENTERING_WORLD = true,
+    PARTY_MEMBERS_CHANGED = true,
+    RAID_ROSTER_UPDATE    = true,
+    UNIT_PET              = true,
+    UNIT_PET_GUID         = true,
+}
+
 local function SyncEventRegistration(ev)
     local list = eventListeners[ev]
     if list and table.getn(list) > 0 then
         hubFrame:RegisterEvent(ev)
     else
-        hubFrame:UnregisterEvent(ev)
+        if not CORE_EVENTS[ev] then
+            hubFrame:UnregisterEvent(ev)
+        end
         eventListeners[ev] = nil
     end
 
@@ -192,19 +278,21 @@ local function SyncEventRegistration(ev)
 end
 
 -- Helper: check if playerGUID (or optionally petGUID) matches any GUID field of the event.
--- In Nampower events, arg1 and arg2 are almost always target/caster or attacker/target GUIDs.
-local function MatchesSelfFilter(filter, ev, a1, a2)
+-- In Nampower events, arg1 and arg2 are almost always target/caster or attacker/target GUIDs;
+-- AURA_CAST_ON_* passes (spellId, casterGuid, targetGuid).
+local function MatchesSelfFilter(filter, ev, a1, a2, a3)
     if not filter then return true end
     local me = playerGUID
     if not me then return true end
 
+    local checkA3 = (ev == "AURA_CAST_ON_SELF" or ev == "AURA_CAST_ON_OTHER")
     if filter == "self" then
-        if a1 == me or a2 == me then return true end
+        if a1 == me or a2 == me or (checkA3 and a3 == me) then return true end
         return false
     elseif filter == "self_or_pet" then
         local pet = petGUID
-        if a1 == me or a2 == me then return true end
-        if pet and (a1 == pet or a2 == pet) then return true end
+        if a1 == me or a2 == me or (checkA3 and a3 == me) then return true end
+        if pet and (a1 == pet or a2 == pet or (checkA3 and a3 == pet)) then return true end
         return false
     end
     return true
@@ -227,12 +315,14 @@ function CH:Subscribe(id, displayName, events, callback, filter)
     end
 
     local sub = {
-        id       = id,
-        name     = displayName or id,
-        events   = events,
-        callback = callback,
-        filter   = filter,
-        active   = true,
+        id            = id,
+        name          = displayName or id,
+        events        = events,
+        callback      = callback,
+        filter        = filter,
+        active        = true,
+        errorCount    = 0,
+        lastErrorTime = 0,
     }
     subscribers[id] = sub
     table.insert(subscriberOrder, id)
@@ -306,7 +396,7 @@ end
 deferFrame:SetScript("OnUpdate", function()
     this:Hide()
     postLoginRan = true
-    CH:RefreshSelfGUIDs()
+    CH:RefreshRosterCache()
     local i
     for i = 1, table.getn(postLoginQueue) do
         local ok, err = pcall(postLoginQueue[i])
@@ -322,6 +412,8 @@ end)
 -------------------------------------------------------------------------
 hubFrame:RegisterEvent("PLAYER_LOGIN")
 hubFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+hubFrame:RegisterEvent("PARTY_MEMBERS_CHANGED")
+hubFrame:RegisterEvent("RAID_ROSTER_UPDATE")
 hubFrame:RegisterEvent("UNIT_PET")
 if type(GetNampowerVersion) == "function" then
     hubFrame:RegisterEvent("UNIT_PET_GUID")
@@ -331,7 +423,7 @@ hubFrame:SetScript("OnEvent", function()
     local ev = event
     if ev == "PLAYER_LOGIN" then
         DetectMods()
-        CH:RefreshSelfGUIDs()
+        CH:RefreshRosterCache()
         if CH.mods.nampower then
             this:RegisterEvent("UNIT_PET_GUID")
         end
@@ -339,10 +431,27 @@ hubFrame:SetScript("OnEvent", function()
         return
     end
 
-    if ev == "PLAYER_ENTERING_WORLD" or ev == "UNIT_PET_GUID" then
+    if ev == "PLAYER_ENTERING_WORLD" or ev == "PARTY_MEMBERS_CHANGED" or ev == "RAID_ROSTER_UPDATE" then
+        CH:RefreshRosterCache()
+    elseif ev == "UNIT_PET_GUID" then
         CH:RefreshSelfGUIDs()
-    elseif ev == "UNIT_PET" and arg1 == "player" then
-        CH:RefreshSelfGUIDs()
+    elseif ev == "UNIT_PET" then
+        if arg1 == "player" then
+            CH:RefreshSelfGUIDs()
+        elseif type(arg1) == "string" then
+            local petUnit
+            if string.find(arg1, "^raid%d+$") then
+                petUnit = string.gsub(arg1, "^raid", "raidpet")
+            elseif string.find(arg1, "^party%d+$") then
+                petUnit = string.gsub(arg1, "^party", "partypet")
+            end
+            if petUnit then
+                local ownerG = ReadUnitGUID(arg1)
+                if ownerG then
+                    CacheRosterUnit(petUnit, ownerG)
+                end
+            end
+        end
     end
 
     local list = eventListeners[ev]
@@ -354,9 +463,18 @@ hubFrame:SetScript("OnEvent", function()
     for i = 1, n do
         local sub = list[i]
         if sub and sub.active then
-            if MatchesSelfFilter(sub.filter, ev, a1, a2) then
+            if MatchesSelfFilter(sub.filter, ev, a1, a2, a3) then
                 CH.stats.dispatched = CH.stats.dispatched + 1
-                sub.callback(ev, a1, a2, a3, a4, a5, a6, a7, a8, a9)
+                local ok, err = pcall(sub.callback, ev, a1, a2, a3, a4, a5, a6, a7, a8, a9)
+                if not ok then
+                    CH.stats.errors = CH.stats.errors + 1
+                    sub.errorCount = (sub.errorCount or 0) + 1
+                    local now = GetTime and GetTime() or 0
+                    if DEFAULT_CHAT_FRAME and (sub.errorCount == 1 or (now - (sub.lastErrorTime or 0)) >= 10) then
+                        sub.lastErrorTime = now
+                        DEFAULT_CHAT_FRAME:AddMessage("|cffff4444CombatHub|r [" .. tostring(sub.name) .. "] error #" .. tostring(sub.errorCount) .. ": " .. tostring(err))
+                    end
+                end
             else
                 CH.stats.filteredOut = CH.stats.filteredOut + 1
             end
@@ -377,11 +495,15 @@ function CH:InvokeFrameOnEvent(targetFrame, handler, ev, a1, a2, a3, a4, a5, a6,
     event = ev
     arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9 = a1, a2, a3, a4, a5, a6, a7, a8, a9
 
-    handler()
+    local ok, err = pcall(handler)
 
     this  = prevThis
     event = prevEvent
     arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9 = p1, p2, p3, p4, p5, p6, p7, p8, p9
+
+    if not ok then
+        error(err, 0)
+    end
 end
 
 -------------------------------------------------------------------------
@@ -397,8 +519,11 @@ function CH:PrintStatus()
         .. ", DPSLog=" .. tostring(CH.mods.dpslog))
     p:AddMessage("  Active hub events: |cffffff00" .. tostring(CH.stats.registeredEvents)
         .. "|r | Dispatched: |cff33ff33" .. tostring(CH.stats.dispatched)
-        .. "|r | Filtered out: |cff99ccff" .. tostring(CH.stats.filteredOut) .. "|r")
-    p:AddMessage("  Caches: GUID=" .. tostring(guidNameCount) .. ", Spell=" .. tostring(spellCacheCount))
+        .. "|r | Filtered out: |cff99ccff" .. tostring(CH.stats.filteredOut)
+        .. "|r | Errors: |cffff6666" .. tostring(CH.stats.errors) .. "|r")
+    p:AddMessage("  Caches: GUID=" .. tostring(guidNameCount)
+        .. ", Roster=" .. tostring(rosterCacheCount)
+        .. ", Spell=" .. tostring(spellCacheCount))
 
     local n = table.getn(subscriberOrder)
     if n == 0 then
@@ -420,7 +545,7 @@ end
 SLASH_COMBATHUB1 = "/combathub"
 SLASH_COMBATHUB2 = "/chub"
 SlashCmdList["COMBATHUB"] = function(msg)
-    local cmd = string.lower(msg or "")
+    local cmd = string.lower(string.gsub(msg or "", "^%s*(.-)%s*$", "%1"))
     if cmd == "trace" then
         CH.debugTrace = not CH.debugTrace
         if DEFAULT_CHAT_FRAME then

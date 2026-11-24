@@ -26,11 +26,12 @@ Shared combat event dispatcher, GUID/spell cache, and adapter coordinator for Va
 
 ## Features
 
-- **Single Reference-Counted Listener:** `CombatHubFrame` only registers a WoW/DLL event when at least one active subscriber requests it.
+- **Single Reference-Counted Listener:** `CombatHubFrame` only registers a WoW/DLL event when at least one active subscriber requests it (core lifecycle/roster events remain protected).
+- **Fault-Isolated Dispatch:** Subscriber callbacks run under `pcall` with throttled error reporting (at most once every 10s per subscriber) so a Lua error in one addon never interrupts downstream addons.
 - **Filtered Dispatch:** Drops non-self/non-pet events (`*_OTHER`) at the hub before invoking consumer handlers (`EavesDrop`, `KLHThreatMeter`, `vampify`).
-- **Shared GUID & Spell Caches:** Bounded caches (`800` GUIDs, `600` spells) with `CombatHub:ResolveUnitName(guid)` and `CombatHub:ResolveSpell(spellId)` to avoid redundant C-API lookups.
+- **Shared Roster, Pet-Owner & Spell Caches:** Pre-populates `GUID -> name`, `GUID -> unitToken` (`GetUnitToken`), and `petGUID -> ownerGUID` (`GetOwnerGUID`) on roster changes (`PARTY_MEMBERS_CHANGED`, `RAID_ROSTER_UPDATE`, `PLAYER_ENTERING_WORLD`), alongside bounded GUID (`800`) and spell (`600`) caches (`ResolveUnitName`, `ResolveSpell`).
 - **Zero-Touch Fallback:** If `CombatHub` is disabled or removed, all supported addons automatically run their original event listeners unchanged.
 - **Slash Commands:**
-  - `/chub` or `/combathub` — Show active mods, hub event count, dispatched/filtered counts, cache sizes, and connected subscribers.
+  - `/chub` or `/combathub` — Show active mods, hub event count, dispatched/filtered/error counts, cache sizes (GUID, Roster, Spell), and connected subscribers.
   - `/chub trace` — Toggle debug trace logging.
-  - `/chub clear` — Clear GUID and spell caches and refresh self/pet GUIDs.
+  - `/chub clear` — Clear GUID, roster, and spell caches and refresh roster/self/pet GUIDs.
