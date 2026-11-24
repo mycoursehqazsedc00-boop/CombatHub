@@ -75,8 +75,10 @@ end
 local function CacheRosterUnit(unit, ownerGuid)
     local g = ReadUnitGUID(unit)
     if not g then return nil end
+    if not guidUnitCache[g] then
+        rosterCacheCount = rosterCacheCount + 1
+    end
     guidUnitCache[g] = unit
-    rosterCacheCount = rosterCacheCount + 1
     if ownerGuid then
         petOwnerCache[g] = ownerGuid
     end
@@ -86,13 +88,29 @@ local function CacheRosterUnit(unit, ownerGuid)
 end
 
 function CH:RefreshSelfGUIDs()
+    local oldPet = petGUID
     playerGUID = ReadUnitGUID("player")
     petGUID    = ReadUnitGUID("pet")
+    if oldPet and oldPet ~= petGUID then
+        if guidUnitCache[oldPet] then
+            guidUnitCache[oldPet] = nil
+            if rosterCacheCount > 0 then
+                rosterCacheCount = rosterCacheCount - 1
+            end
+        end
+        petOwnerCache[oldPet] = nil
+    end
     if playerGUID then
+        if not guidUnitCache[playerGUID] then
+            rosterCacheCount = rosterCacheCount + 1
+        end
         guidUnitCache[playerGUID] = "player"
         StoreGuidName(playerGUID, UnitName("player"))
     end
     if petGUID then
+        if not guidUnitCache[petGUID] then
+            rosterCacheCount = rosterCacheCount + 1
+        end
         guidUnitCache[petGUID] = "pet"
         if playerGUID then
             petOwnerCache[petGUID] = playerGUID
@@ -158,7 +176,7 @@ function CH:ResolveUnitName(guid)
     if not guid or guid == "" then return nil end
     local cached = guidNameCache[guid]
     if cached then return cached end
-    if not CH.mods.superwow then return nil end
+    if not CH.mods.superwow and not CH.mods.nampower then return nil end
 
     local ok, name = pcall(UnitName, guid)
     if ok and name and name ~= "" and name ~= "Unknown" then
@@ -279,20 +297,29 @@ end
 
 -- Helper: check if playerGUID (or optionally petGUID) matches any GUID field of the event.
 -- In Nampower events, arg1 and arg2 are almost always target/caster or attacker/target GUIDs;
--- AURA_CAST_ON_* passes (spellId, casterGuid, targetGuid).
-local function MatchesSelfFilter(filter, ev, a1, a2, a3)
+-- AURA_CAST_ON_* passes (spellId, casterGuid, targetGuid);
+-- SPELL_START_* and SPELL_GO_* pass (itemId, spellId, casterGuid, targetGuid, ...).
+local function MatchesSelfFilter(filter, ev, a1, a2, a3, a4)
     if not filter then return true end
     local me = playerGUID
     if not me then return true end
 
-    local checkA3 = (ev == "AURA_CAST_ON_SELF" or ev == "AURA_CAST_ON_OTHER")
+    local g1, g2
+    if ev == "AURA_CAST_ON_SELF" or ev == "AURA_CAST_ON_OTHER" then
+        g1, g2 = a2, a3
+    elseif ev == "SPELL_START_SELF" or ev == "SPELL_START_OTHER"
+        or ev == "SPELL_GO_SELF" or ev == "SPELL_GO_OTHER" then
+        g1, g2 = a3, a4
+    else
+        g1, g2 = a1, a2
+    end
+
     if filter == "self" then
-        if a1 == me or a2 == me or (checkA3 and a3 == me) then return true end
-        return false
+        return (g1 == me or g2 == me)
     elseif filter == "self_or_pet" then
+        if g1 == me or g2 == me then return true end
         local pet = petGUID
-        if a1 == me or a2 == me or (checkA3 and a3 == me) then return true end
-        if pet and (a1 == pet or a2 == pet or (checkA3 and a3 == pet)) then return true end
+        if pet and (g1 == pet or g2 == pet) then return true end
         return false
     end
     return true
@@ -330,10 +357,16 @@ function CH:Subscribe(id, displayName, events, callback, filter)
     local i
     for i = 1, table.getn(events) do
         local ev = events[i]
-        if not eventListeners[ev] then
-            eventListeners[ev] = {}
+        local oldList = eventListeners[ev]
+        local newList = {}
+        if oldList then
+            local j
+            for j = 1, table.getn(oldList) do
+                newList[j] = oldList[j]
+            end
         end
-        table.insert(eventListeners[ev], sub)
+        table.insert(newList, sub)
+        eventListeners[ev] = newList
         SyncEventRegistration(ev)
     end
 
@@ -351,12 +384,14 @@ function CH:Unsubscribe(id)
         local ev = sub.events[i]
         local list = eventListeners[ev]
         if list then
+            local newList = {}
             local j
-            for j = table.getn(list), 1, -1 do
-                if list[j] == sub then
-                    table.remove(list, j)
+            for j = 1, table.getn(list) do
+                if list[j] ~= sub then
+                    table.insert(newList, list[j])
                 end
             end
+            eventListeners[ev] = newList
             SyncEventRegistration(ev)
         end
     end
@@ -434,7 +469,20 @@ hubFrame:SetScript("OnEvent", function()
     if ev == "PLAYER_ENTERING_WORLD" or ev == "PARTY_MEMBERS_CHANGED" or ev == "RAID_ROSTER_UPDATE" then
         CH:RefreshRosterCache()
     elseif ev == "UNIT_PET_GUID" then
-        CH:RefreshSelfGUIDs()
+        if arg2 == 1 or arg5 == 1 or not arg1 then
+            CH:RefreshSelfGUIDs()
+        end
+        if type(arg7) == "number" and arg7 > 0 then
+            local ownerG = ReadUnitGUID("raid" .. arg7)
+            if ownerG then
+                CacheRosterUnit("raidpet" .. arg7, ownerG)
+            end
+        elseif type(arg6) == "number" and arg6 > 0 then
+            local ownerG = ReadUnitGUID("party" .. arg6)
+            if ownerG then
+                CacheRosterUnit("partypet" .. arg6, ownerG)
+            end
+        end
     elseif ev == "UNIT_PET" then
         if arg1 == "player" then
             CH:RefreshSelfGUIDs()
@@ -463,7 +511,7 @@ hubFrame:SetScript("OnEvent", function()
     for i = 1, n do
         local sub = list[i]
         if sub and sub.active then
-            if MatchesSelfFilter(sub.filter, ev, a1, a2, a3) then
+            if MatchesSelfFilter(sub.filter, ev, a1, a2, a3, a4) then
                 CH.stats.dispatched = CH.stats.dispatched + 1
                 local ok, err = pcall(sub.callback, ev, a1, a2, a3, a4, a5, a6, a7, a8, a9)
                 if not ok then
@@ -495,7 +543,7 @@ function CH:InvokeFrameOnEvent(targetFrame, handler, ev, a1, a2, a3, a4, a5, a6,
     event = ev
     arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9 = a1, a2, a3, a4, a5, a6, a7, a8, a9
 
-    local ok, err = pcall(handler)
+    local ok, err = pcall(handler, targetFrame, ev, a1, a2, a3, a4, a5, a6, a7, a8, a9)
 
     this  = prevThis
     event = prevEvent
